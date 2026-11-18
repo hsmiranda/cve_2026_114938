@@ -1,0 +1,52 @@
+# Audit outputs, logs & reports
+*.log
+*.out
+*.err
+*.report
+audit_*.txt
+scan_*.txt
+reports/
+logs/
+output/
+*.json
+*.csv
+
+# Temporary & backup files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+.#*
+
+# Environment & sensitive data
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Java / JVM artifacts
+*.class
+*.jar
+*.war
+*.ear
+hs_err_pid*.log
+replay_pid*.log
+target/
+build/
+.gradle/
+
+# IDE & Editor directories
+.idea/
+.vscode/
+*.iml
+.project
+.classpath
+.settings/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
