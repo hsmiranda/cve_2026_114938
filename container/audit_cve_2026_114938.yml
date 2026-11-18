@@ -1,0 +1,150 @@
+---
+- name: Audit target servers for CVE-2026-114938 (Java4Shell)
+  hosts: "{{ target_hosts | default('all') }}"
+  become: true
+  gather_facts: true
+  vars:
+    fail_on_exposed: false
+
+  tasks:
+    - name: Check 1 - Evaluate host architecture
+      ansible.builtin.set_fact:
+        cve_2026_114938_is_x86_64: "{{ ansible_facts['architecture'] == 'x86_64' }}"
+
+    - name: Check 2 - Scan host filesystem for Java binaries with UseBASE64Intrinsics
+      ansible.builtin.shell: |
+        set -o pipefail
+        JAVA_BINS=$(find /usr /opt /home /var -name "java" -type f -executable 2>/dev/null | grep -E "bin/java$" || true)
+        if [[ -n "$JAVA_BINS" ]]; then
+          while IFS= read -r bin; do
+            INTRINSIC_CHECK=$("$bin" -XX:+UnlockDiagnosticVMOptions -XX:+PrintFlagsFinal -version 2>&1 | grep "UseBASE64Intrinsics" || true)
+            if [[ -n "$INTRINSIC_CHECK" ]]; then
+              FLAG_DETAILS=$(echo "$INTRINSIC_CHECK" | xargs)
+              echo "EXPOSED_BINARY|${bin}|${FLAG_DETAILS}"
+            fi
+          done <<< "$JAVA_BINS"
+        fi
+      args:
+        executable: /bin/bash
+      register: java_binary_scan
+      changed_when: false
+      failed_when: false
+      when: cve_2026_114938_is_x86_64 | bool
+
+    - name: Check 3 - Inspect active host Java processes for mitigation flag
+      ansible.builtin.shell: |
+        set -o pipefail
+        JAVA_PROCS=$(pgrep -fa "java" || true)
+        if [[ -n "$JAVA_PROCS" ]]; then
+          while IFS= read -r proc; do
+            PID=$(echo "$proc" | awk '{print $1}')
+            CMD=$(echo "$proc" | cut -d' ' -f2-)
+            if [[ "$PID" == "$$" || "$PID" == "$PPID" || "$CMD" == *"pgrep -fa"* || "$CMD" == *"MITIGATED_PROC"* ]]; then
+              continue
+            fi
+            ENV_VARS=""
+            if [[ -r "/proc/${PID}/environ" ]]; then
+              ENV_VARS=$(tr '\0' '\n' < "/proc/${PID}/environ" 2>/dev/null | grep -E "^(JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS)=" || true)
+            fi
+            if [[ "$CMD" == *"-XX:-UseBASE64Intrinsics"* || "$ENV_VARS" == *"-XX:-UseBASE64Intrinsics"* ]]; then
+              echo "MITIGATED_PROC|${PID}"
+            else
+              echo "EXPOSED_PROC|${PID}|${CMD:0:120}"
+            fi
+          done <<< "$JAVA_PROCS"
+        fi
+      args:
+        executable: /bin/bash
+      register: java_process_scan
+      changed_when: false
+      failed_when: false
+      when: cve_2026_114938_is_x86_64 | bool
+
+    - name: Check 4 - Audit running Podman and Docker containers for Java runtimes
+      ansible.builtin.shell: |
+        set -o pipefail
+        for engine in podman docker; do
+          if ! command -v "$engine" >/dev/null 2>&1; then
+            continue
+          fi
+          containers=$("$engine" ps --format "{% raw %}{{.ID}}|{{.Names}}|{{.Image}}{% endraw %}" 2>/dev/null || true)
+          if [[ -z "$containers" ]]; then
+            continue
+          fi
+          while IFS='|' read -r cid cname cimage; do
+            c_java=$("$engine" exec "$cid" sh -c 'command -v java || find /usr /opt /app -name "java" -type f 2>/dev/null | head -n 1' 2>/dev/null || true)
+            c_proc_check=$("$engine" exec "$cid" sh -c '
+              for p in /proc/[0-9]*; do
+                cmd=$(tr "\0" " " < "$p/cmdline" 2>/dev/null || true)
+                if echo "$cmd" | grep -q "java"; then
+                  env=$(tr "\0" "\n" < "$p/environ" 2>/dev/null | grep -E "^(JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS)=" || true)
+                  echo "ACTIVE_JAVA|${cmd}|${env}"
+                fi
+              done
+            ' 2>/dev/null || true)
+            if [[ -n "$c_java" || -n "$c_proc_check" ]]; then
+              if [[ -n "$c_proc_check" ]]; then
+                if ! echo "$c_proc_check" | grep -q -- "-XX:-UseBASE64Intrinsics"; then
+                  echo "EXPOSED_CONTAINER|${engine}|${cname}|${cimage}|ACTIVE_UNMITIGATED"
+                fi
+              else
+                echo "EXPOSED_CONTAINER|${engine}|${cname}|${cimage}|INSTALLED_IDLE"
+              fi
+            fi
+          done <<< "$containers"
+        done
+      args:
+        executable: /bin/bash
+      register: java_container_scan
+      changed_when: false
+      failed_when: false
+      when: cve_2026_114938_is_x86_64 | bool
+
+    - name: Aggregate CVE-2026-114938 audit status
+      ansible.builtin.set_fact:
+        cve_2026_114938_exposed_binaries: >-
+          {{ (java_binary_scan.stdout_lines | default([]))
+             | select('match', '^EXPOSED_BINARY\|') | list }}
+        cve_2026_114938_exposed_procs: >-
+          {{ (java_process_scan.stdout_lines | default([]))
+             | select('match', '^EXPOSED_PROC\|') | list }}
+        cve_2026_114938_mitigated_procs: >-
+          {{ (java_process_scan.stdout_lines | default([]))
+             | select('match', '^MITIGATED_PROC\|') | list }}
+        cve_2026_114938_exposed_containers: >-
+          {{ (java_container_scan.stdout_lines | default([]))
+             | select('match', '^EXPOSED_CONTAINER\|') | list }}
+
+    - name: Compute vulnerability boolean and summary findings
+      ansible.builtin.set_fact:
+        cve_2026_114938_findings: >-
+          {{ cve_2026_114938_exposed_binaries
+             + cve_2026_114938_exposed_procs
+             + cve_2026_114938_exposed_containers }}
+        cve_2026_114938_vulnerable: >-
+          {{ (cve_2026_114938_is_x86_64 | bool)
+             and ((cve_2026_114938_exposed_binaries | length > 0)
+                  or (cve_2026_114938_exposed_procs | length > 0)
+                  or (cve_2026_114938_exposed_containers | length > 0)) }}
+
+    - name: Print CVE-2026-114938 audit report
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }} | Architecture: {{ ansible_facts['architecture'] }}"
+          - "Status: {{ 'VULNERABLE / EXPOSED' if (cve_2026_114938_vulnerable | bool) else 'PASS (Not exposed or mitigated)' }}"
+          - "Mitigated host processes: {{ cve_2026_114938_mitigated_procs }}"
+          - "Findings: {{ cve_2026_114938_findings if (cve_2026_114938_findings | length > 0) else ['None'] }}"
+          - >-
+            {{ 'Remediation: Update OpenJDK/JDK packages (or rebuild container images), or apply -XX:+UnlockDiagnosticVMOptions -XX:-UseBASE64Intrinsics via JAVA_TOOL_OPTIONS.'
+               if (cve_2026_114938_vulnerable | bool)
+               else 'No remediation required.' }}
+
+    - name: Fail play if exposed targets found and fail_on_exposed is enabled
+      ansible.builtin.fail:
+        msg: >-
+          Target {{ inventory_hostname }} is potentially vulnerable/exposed to CVE-2026-114938.
+          Findings: {{ cve_2026_114938_findings | join('; ') }}.
+          Update JDK/container images or apply -XX:+UnlockDiagnosticVMOptions -XX:-UseBASE64Intrinsics via JAVA_TOOL_OPTIONS.
+      when:
+        - fail_on_exposed | bool
+        - cve_2026_114938_vulnerable | bool

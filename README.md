@@ -23,6 +23,23 @@ chmod +x audit_cve_2026_114938.sh
 - `0`: Non-`x86_64` host, or no unmitigated x86-64 HotSpot Java runtimes/containers detected.
 - `1`: One or more potentially exposed Java runtimes, processes, or containers found.
 
+## Remote / Multi-Host Auditing (Ansible)
+
+For auditing multiple target servers remotely via Ansible, see [ansible/README.md](ansible/README.md) and the standalone playbook [ansible/audit_cve_2026_114938.yml](ansible/audit_cve_2026_114938.yml):
+
+```bash
+ansible-playbook -i ansible/inventory.ini ansible/audit_cve_2026_114938.yml
+```
+
+## Containerized Audit (Podman / Docker)
+
+To build and run the audit inside a **Red Hat UBI 9 Minimal** (`registry.access.redhat.com/ubi9/ubi-minimal:latest`) container targeting a server by IP, see [container/README.md](container/README.md) and [container/ContainerFile](container/ContainerFile):
+
+```bash
+podman build -t cve-2026_114938 -f container/ContainerFile .
+podman run --rm -v ~/.ssh:/root/.ssh:ro,Z cve-2026_114938 -e target=192.168.1.10
+```
+
 ## Mitigation
 
 If exposed runtimes are reported, the script recommends:

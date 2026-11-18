@@ -1,0 +1,32 @@
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+RUN microdnf install -y \
+    bash \
+    openssh-clients \
+    procps-ng \
+    findutils \
+    grep \
+    python3.12 \
+    python3.12-pip && \
+    microdnf clean all && \
+    pip3.12 install --no-cache-dir ansible-core
+
+COPY . /tmp/context
+
+RUN mkdir -p /opt/audit /root/.ssh && \
+    chmod 700 /root/.ssh && \
+    if [ -f /tmp/context/ansible/audit_cve_2026_114938.yml ]; then \
+      cp /tmp/context/audit_cve_2026_114938.sh /opt/audit/audit_cve_2026_114938.sh && \
+      cp /tmp/context/ansible/audit_cve_2026_114938.yml /opt/audit/audit_cve_2026_114938.yml && \
+      cp /tmp/context/container/entrypoint.sh /usr/local/bin/entrypoint.sh; \
+    else \
+      cp /tmp/context/audit_cve_2026_114938.sh /opt/audit/audit_cve_2026_114938.sh && \
+      cp /tmp/context/audit_cve_2026_114938.yml /opt/audit/audit_cve_2026_114938.yml && \
+      cp /tmp/context/entrypoint.sh /usr/local/bin/entrypoint.sh; \
+    fi && \
+    chmod +x /opt/audit/audit_cve_2026_114938.sh /usr/local/bin/entrypoint.sh && \
+    rm -rf /tmp/context
+
+ENV ANSIBLE_HOST_KEY_CHECKING=False
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
